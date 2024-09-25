@@ -3,8 +3,10 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
 from utils import extract_rating, extract_place_and_date
 import time
+import shutil
 
 def scrape_reviews(url, num_reviews):
     chrome_options = Options()
@@ -15,7 +17,10 @@ def scrape_reviews(url, num_reviews):
     chrome_options.add_argument("--disable-gpu")  # Optional, if GPU issues occur
     chrome_options.add_argument("--window-size=1920x1080")  # Set the window size for consistency in headless mode
     
-    driver = webdriver.Chrome(options=chrome_options)
+    # Find the path to Chromium browser and driver
+    chrome_path = shutil.which("chromium-browser")
+    driver_path = shutil.which("chromium-chromedriver")
+    driver=webdriver.Chrome(service=Service(driver_path), options=chrome_options)
     driver.get(url)
 
     reviews = []
