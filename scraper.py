@@ -1,82 +1,89 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from utils import extract_rating, extract_place_and_date
-import time
-import shutil
+import requests
+from selectorlib import Extractor
+from dateutil import parser as dateparser
+import pandas as pd
+
+# Load the extractor from the YAML file
+extractor = Extractor.from_yaml_file('selectors.yml')
 
 def scrape_reviews(url, num_reviews):
-    chrome_options = Options()
-    # Ensures no GUI is required and runs fully headless
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")  # Required for some cloud environments
-    chrome_options.add_argument("--disable-dev-shm-usage")  # Overcome limited resources in containers
-    chrome_options.add_argument("--disable-gpu")  # Optional, if GPU issues occur
-    chrome_options.add_argument("--window-size=1920x1080")  # Set the window size for consistency in headless mode
-    
-    # Find the path to Chromium browser and driver
-    chrome_path = shutil.which("chromium-browser")
-    driver_path = shutil.which("chromium-chromedriver")
-    driver=webdriver.Chrome(service=Service(driver_path), options=chrome_options)
-    driver.get(url)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (X11; CrOS x86_64 8172.45.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.64 Safari/537.36'
+    }
 
     reviews = []
     page = 1
 
     while len(reviews) < num_reviews:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "[data-hook='review']"))
-        )
+        print(f"Scraping page {page} of reviews...")
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code > 500:
+            if "automated access to Amazon data" in response.text:
+                print("Blocked by Amazon. Try using a proxy or reducing request frequency.")
+                return None
+            print(f"Error {response.status_code}: Unable to fetch page.")
+            break
+        
+        # Use selectorlib to extract data
+        data = extractor.extract(response.text, base_url=url)
+        
+        if not data['reviews']:
+            print("No reviews found.")
+            break
+        
+        for r in data['reviews']:
+            # Clean up and structure the data
+            date_posted = r.get('date', '').split('on ')[-1]
+            r['date'] = dateparser.parse(date_posted).strftime('%d %b %Y') if date_posted else 'Unknown'
 
-        review_elements = driver.find_elements(By.CSS_SELECTOR, "[data-hook='review']")
+            # Check if the rating exists before processing
+            rating = r.get('rating', None)
+            if rating:
+                try:
+                    r['rating'] = float(r['rating'].split('out of')[0].strip())
+                except (ValueError, AttributeError):
+                    r['rating'] = None  # Handle the case where rating format is incorrect
+            else:
+                r['rating'] = None  # Set rating to None if not found
+            
+            # Check if 'verified_purchase' exists
+            r['verified_purchase'] = 'Verified Purchase' in r.get('verified_purchase', '')
 
-        for review in review_elements:
-            if len(reviews) >= num_reviews:
-                break
+            # Handle 'found_helpful' safely
+            found_helpful = r.get('found_helpful', '0')  # Default to '0' if None
+            if found_helpful:
+                found_helpful = found_helpful.split()[0]  # Split and take the first value if available
+            else:
+                found_helpful = '0'  # Fallback to '0'
 
-            try:
-                rating_element = review.find_element(By.CSS_SELECTOR, "i[data-hook='review-star-rating']")
-                rating_string = rating_element.get_attribute('innerHTML')
-                rating = extract_rating(rating_string)
+            reviews.append({
+                'author': r.get('author', 'Unknown'),
+                'title': r.get('title', 'No Title'),
+                'content': r.get('content', 'No Content'),
+                'date': r['date'],
+                'rating': r['rating'],
+                'found_helpful': found_helpful,
+                'verified_purchase': r['verified_purchase'],
+                'variant': r.get('variant', ''),
+                'product': data.get('product_title', ''),
+                'url': url
+            })
+        
+        # Stop if enough reviews are collected
+        if len(reviews) >= num_reviews:
+            break
 
-                title = review.find_element(By.CSS_SELECTOR, "a[data-hook='review-title']").text
-                body = review.find_element(By.CSS_SELECTOR, "span[data-hook='review-body']").text
-                date_string = review.find_element(By.CSS_SELECTOR, "span[data-hook='review-date']").text
-                place, date = extract_place_and_date(date_string)
-                
-                reviews.append({
-                    'rating': rating,
-                    'title': title,
-                    'body': body,
-                    'place': place,
-                    'date': date
-                })
-            except Exception as e:
-                print(f"Error extracting review: {str(e)}")
-
-        if len(reviews) < num_reviews:
-            try:
-                next_button = driver.find_element(By.CSS_SELECTOR, "li.a-last a")
-                next_button.click()
-                time.sleep(2)
-                page += 1
-            except Exception as e:
-                print(f"Error navigating to next page: {str(e)}")
-                break
-
-    driver.quit()
-    return reviews
-
-def format_reviews(reviews):
-    formatted_reviews = ""
-    for review in reviews:
-        formatted_reviews += f"Rating: {review['rating']}\n"
-        formatted_reviews += f"Title: {review['title']}\n"
-        formatted_reviews += f"Place: {review['place']}\n"
-        formatted_reviews += f"Date: {review['date']}\n"
-        formatted_reviews += f"Review: {review['body']}\n"
-        formatted_reviews += "-" * 50 + "\n"
-    return formatted_reviews
+        # Move to the next page if available
+        next_page = data.get('next_page')
+        if next_page:
+            # Check if the URL already contains the full URL
+            if next_page.startswith("http"):
+                url = next_page  # Use the full URL if already provided
+            else:
+                url = f"https://www.amazon.in{next_page}"  # Concatenate correctly
+            page += 1
+        else:
+            break
+    df=pd.DataFrame(reviews)
+    return df,reviews[:num_reviews]
